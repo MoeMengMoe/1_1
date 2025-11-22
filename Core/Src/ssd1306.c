@@ -5,9 +5,12 @@
 
 #define SSD1306_I2C_ADDR (0x3CU << 1)
 
+extern I2C_HandleTypeDef hi2c1;
+
 static uint8_t oledBuffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8U];
 static uint8_t cursorX = 0U;
 static uint8_t cursorY = 0U;
+static uint8_t i2cTxBuffer[SSD1306_WIDTH + 1U];
 
 static const uint8_t Font5x7[][5] = {
     {0x00,0x00,0x00,0x00,0x00}, // 0x20 ' '
@@ -108,87 +111,28 @@ static const uint8_t Font5x7[][5] = {
     {0x7F,0x7F,0x7F,0x7F,0x7F}, // 0x7F del (filled)
 };
 
-static void I2C_Delay(void)
-{
-  for (volatile uint32_t i = 0; i < 200U; ++i)
-  {
-    __NOP();
-  }
-}
-
-#define SDA_HIGH() HAL_GPIO_WritePin(OLED_SDA_GPIO_Port, OLED_SDA_Pin, GPIO_PIN_SET)
-#define SDA_LOW()  HAL_GPIO_WritePin(OLED_SDA_GPIO_Port, OLED_SDA_Pin, GPIO_PIN_RESET)
-#define SCL_HIGH() HAL_GPIO_WritePin(OLED_SCL_GPIO_Port, OLED_SCL_Pin, GPIO_PIN_SET)
-#define SCL_LOW()  HAL_GPIO_WritePin(OLED_SCL_GPIO_Port, OLED_SCL_Pin, GPIO_PIN_RESET)
-#define SDA_READ() HAL_GPIO_ReadPin(OLED_SDA_GPIO_Port, OLED_SDA_Pin)
-
-static void SoftI2C_Start(void)
-{
-  SDA_HIGH();
-  SCL_HIGH();
-  I2C_Delay();
-  SDA_LOW();
-  I2C_Delay();
-  SCL_LOW();
-}
-
-static void SoftI2C_Stop(void)
-{
-  SCL_LOW();
-  SDA_LOW();
-  I2C_Delay();
-  SCL_HIGH();
-  I2C_Delay();
-  SDA_HIGH();
-  I2C_Delay();
-}
-
-static void SoftI2C_WriteByte(uint8_t value)
-{
-  for (uint8_t i = 0U; i < 8U; ++i)
-  {
-    if ((value & 0x80U) != 0U)
-    {
-      SDA_HIGH();
-    }
-    else
-    {
-      SDA_LOW();
-    }
-    I2C_Delay();
-    SCL_HIGH();
-    I2C_Delay();
-    SCL_LOW();
-    value <<= 1U;
-  }
-
-  SDA_HIGH();
-  I2C_Delay();
-  SCL_HIGH();
-  I2C_Delay();
-  SCL_LOW();
-  I2C_Delay();
-}
-
 static void SSD1306_WriteCommand(uint8_t command)
 {
-  SoftI2C_Start();
-  SoftI2C_WriteByte(SSD1306_I2C_ADDR);
-  SoftI2C_WriteByte(0x00U);
-  SoftI2C_WriteByte(command);
-  SoftI2C_Stop();
+  uint8_t buffer[2U] = {0x00U, command};
+  HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, buffer, sizeof(buffer), HAL_MAX_DELAY);
 }
 
 static void SSD1306_WriteData(const uint8_t *data, uint16_t size)
 {
-  SoftI2C_Start();
-  SoftI2C_WriteByte(SSD1306_I2C_ADDR);
-  SoftI2C_WriteByte(0x40U);
-  for (uint16_t i = 0U; i < size; ++i)
+  if ((data == NULL) || (size == 0U))
   {
-    SoftI2C_WriteByte(data[i]);
+    return;
   }
-  SoftI2C_Stop();
+
+  while (size > 0U)
+  {
+    uint16_t chunk = (size > SSD1306_WIDTH) ? SSD1306_WIDTH : size;
+    i2cTxBuffer[0U] = 0x40U;
+    memcpy(&i2cTxBuffer[1U], data, chunk);
+    HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, i2cTxBuffer, chunk + 1U, HAL_MAX_DELAY);
+    data += chunk;
+    size -= chunk;
+  }
 }
 
 void SSD1306_Init(void)
