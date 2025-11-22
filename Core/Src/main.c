@@ -21,6 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include "ssd1306.h"
 
 /* USER CODE END Includes */
 
@@ -49,6 +53,7 @@
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
+static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, uint8_t isRunning);
 
 /* USER CODE END PFP */
 
@@ -89,12 +94,17 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
+  SSD1306_Init();
+  SSD1306_Fill(0U);
+  SSD1306_UpdateScreen();
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
   uint8_t isRunning = 0;
   static uint8_t keyReady = 1;
+  uint8_t ledState = 0;
   static uint32_t lastBlinkTime = 0;
   static uint32_t runStartTime = 0;
+  uint32_t lastDisplaySecond = UINT32_MAX;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -103,6 +113,8 @@ int main(void)
   {
     uint32_t now = HAL_GetTick();
     GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port,KEY_Pin);
+    uint8_t stateChanged = 0U;
+    uint32_t msToNextToggle = Wait_time;
 
     if ((keyState == GPIO_PIN_SET) && keyReady == 1)
     {
@@ -116,13 +128,16 @@ int main(void)
         {
           runStartTime = now;
           lastBlinkTime = now;
+          ledState = 0U;
         }
         else
         {
           runStartTime = 0;
           lastBlinkTime = 0;
+          ledState = 0U;
           HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+          stateChanged = 1U;
         }
       }
     }
@@ -137,16 +152,22 @@ int main(void)
       {
         runStartTime = now;
         lastBlinkTime = now;
+        ledState = 0U;
       }
 
-      if ((now - lastBlinkTime) >= Wait_time)
+      uint32_t elapsedSinceLastToggle = now - lastBlinkTime;
+      msToNextToggle = (elapsedSinceLastToggle < Wait_time) ? (Wait_time - elapsedSinceLastToggle) : 0U;
+
+      if (elapsedSinceLastToggle >= Wait_time)
       {
         lastBlinkTime = now;
-        HAL_GPIO_WritePin(LED_GPIO_Port,LED_Pin, GPIO_PIN_SET);
-        HAL_GPIO_WritePin(BUZZER_GPIO_Port,BUZZER_Pin, GPIO_PIN_SET);
+        ledState = !ledState;
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
         HAL_Delay(Interval);
-        HAL_GPIO_WritePin(BUZZER_GPIO_Port,BUZZER_Pin, GPIO_PIN_RESET);
-        HAL_Delay(Interval);
+        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+        msToNextToggle = Wait_time;
+        stateChanged = 1U;
         now = HAL_GetTick();
       }
 
@@ -155,15 +176,27 @@ int main(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
         isRunning = 0;
+        ledState = 0U;
         runStartTime = 0;
         lastBlinkTime = 0;
+        msToNextToggle = 0U;
         keyReady = 1;
+        stateChanged = 1U;
       }
     }
     else
     {
       HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+      ledState = 0U;
+      msToNextToggle = Wait_time;
+    }
+
+    uint32_t currentSecond = (msToNextToggle + 999U) / 1000U;
+    if ((currentSecond != lastDisplaySecond) || (stateChanged != 0U))
+    {
+      UpdateDisplay(ledState, msToNextToggle, isRunning);
+      lastDisplaySecond = currentSecond;
     }
   }
 
@@ -227,6 +260,9 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, OLED_SCL_Pin|OLED_SDA_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, LED_Pin|BUZZER_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : LED_Pin BUZZER_Pin */
@@ -235,6 +271,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : OLED_SCL_Pin OLED_SDA_Pin */
+  GPIO_InitStruct.Pin = OLED_SCL_Pin|OLED_SDA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : KEY_Pin */
   GPIO_InitStruct.Pin = KEY_Pin;
@@ -248,6 +291,43 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+  * @brief  Display the LED state and remaining time on the selected interface.
+  * @param  ledState Indicates whether the LED is currently ON (1) or OFF (0)
+  * @param  msToToggle Remaining time in milliseconds before the next state flip
+  * @param  isRunning Scheduler state (1 when active, 0 when stopped)
+  * @retval None
+  */
+static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, uint8_t isRunning)
+{
+  uint32_t seconds = (msToToggle + 999U) / 1000U;
+  const char *stateText = ledState ? "ON" : "OFF";
+  const char *direction = ledState ? "to OFF" : "to ON";
+
+  if (isRunning == 0U)
+  {
+    direction = "to ON";
+  }
+  char line1[21];
+  char line2[25];
+
+  snprintf(line1, sizeof(line1), "LED: %s", stateText);
+  if (isRunning != 0U)
+  {
+    snprintf(line2, sizeof(line2), "REMAIN: %03lus (%s)", (unsigned long)seconds, direction);
+  }
+  else
+  {
+    snprintf(line2, sizeof(line2), "REMAIN: ---s (%s)", direction);
+  }
+
+  SSD1306_Fill(0U);
+  SSD1306_SetCursor(0U, 0U);
+  SSD1306_WriteString(line1);
+  SSD1306_SetCursor(0U, 16U);
+  SSD1306_WriteString(line2);
+  SSD1306_UpdateScreen();
+}
 
 /* USER CODE END 4 */
 
