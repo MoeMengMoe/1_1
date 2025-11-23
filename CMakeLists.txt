@@ -45,6 +45,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ssd1306.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/encoder.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/temperature.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/alarm.c
 )
 
 # Add include paths
