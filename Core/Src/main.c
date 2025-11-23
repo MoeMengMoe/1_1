@@ -29,12 +29,16 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef enum
+{
+  PHASE_WAIT = 0U,
+  PHASE_ALERT
+} Phase_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define KEY_PRESSED_STATE GPIO_PIN_SET
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,7 +50,12 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
-
+static uint8_t isRunning = 0U;
+static uint8_t keyReady = 1U;
+static Phase_t phase = PHASE_WAIT;
+static uint32_t phaseStartTick = 0U;
+static uint8_t buzzerPulseActive = 0U;
+static uint32_t buzzerEventTick = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,9 +69,10 @@ static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, uint8_t isRunni
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-const uint32_t Wait_time = 1000U;
-const uint32_t Last_time = 5000U;
-const uint32_t Interval = 500U;
+const uint32_t Wait_time = 2000U;
+const uint32_t Last_time = 10000U;
+const uint32_t BuzzerOnTime = 200U;
+const uint32_t BuzzerOffTime = 300U;
 /* USER CODE END 0 */
 
 /**
@@ -100,12 +110,11 @@ int main(void)
   SSD1306_Fill(0U);
   SSD1306_UpdateScreen();
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-  uint8_t isRunning = 0;
-  static uint8_t keyReady = 1;
-  uint8_t ledState = 0;
-  static uint32_t lastBlinkTime = 0;
-  static uint32_t runStartTime = 0;
+  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+  phase = PHASE_WAIT;
+  phaseStartTick = HAL_GetTick();
+  buzzerPulseActive = 0U;
+  buzzerEventTick = phaseStartTick;
   uint32_t lastDisplaySecond = UINT32_MAX;
   /* USER CODE END 2 */
 
@@ -113,91 +122,95 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HAL_GPIO_WritePin(LED_TEST_GPIO_Port,LED_TEST_Pin, GPIO_PIN_RESET);
     uint32_t now = HAL_GetTick();
-    GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port,KEY_Pin);
+    GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
     uint8_t stateChanged = 0U;
-    uint32_t msToNextToggle = Wait_time;
+    uint32_t msToNextEvent = Wait_time;
 
-    if ((keyState == GPIO_PIN_SET) && keyReady == 1)
+    if ((keyState == KEY_PRESSED_STATE) && keyReady == 1)
     {
       HAL_Delay(10);
-      if (HAL_GPIO_ReadPin(KEY_GPIO_Port,KEY_Pin) == GPIO_PIN_SET)
+      if (HAL_GPIO_ReadPin(KEY_GPIO_Port,KEY_Pin) == KEY_PRESSED_STATE)
       {
         isRunning = !isRunning;
-        keyReady = 0;
+        keyReady = 0U;
         now = HAL_GetTick();
-        if (isRunning == 1)
-        {
-          runStartTime = now;
-          lastBlinkTime = now;
-          ledState = 0U;
-        }
-        else
-        {
-          runStartTime = 0;
-          lastBlinkTime = 0;
-          ledState = 0U;
-          HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-          stateChanged = 1U;
-        }
+        phaseStartTick = now;
+        buzzerPulseActive = 0U;
+        buzzerEventTick = now;
+        phase = PHASE_WAIT;
+        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+        stateChanged = 1U;
       }
     }
-    else if (keyState == GPIO_PIN_RESET)
+    else if (keyState != KEY_PRESSED_STATE)
     {
       keyReady = 1;
     }
 
-    if (isRunning == 1)
+    if (isRunning == 1U)
     {
-      if (runStartTime == 0U)
+      switch (phase)
       {
-        runStartTime = now;
-        lastBlinkTime = now;
-        ledState = 0U;
-      }
+        case PHASE_WAIT:
+        {
+          HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+          uint32_t elapsed = now - phaseStartTick;
+          if (elapsed >= Wait_time)
+          {
+            phase = PHASE_ALERT;
+            phaseStartTick = now;
+            buzzerPulseActive = 0U;
+            buzzerEventTick = now;
+            stateChanged = 1U;
+          }
+          msToNextEvent = (elapsed < Wait_time) ? (Wait_time - elapsed) : 0U;
+          break;
+        }
+        case PHASE_ALERT:
+        default:
+        {
+          if ((buzzerPulseActive == 0U) && (now >= buzzerEventTick))
+          {
+            HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+            buzzerPulseActive = 1U;
+            buzzerEventTick = now + BuzzerOnTime;
+          }
+          else if ((buzzerPulseActive == 1U) && (now >= buzzerEventTick))
+          {
+            HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+            buzzerPulseActive = 0U;
+            buzzerEventTick = now + BuzzerOffTime;
+          }
 
-      uint32_t elapsedSinceLastToggle = now - lastBlinkTime;
-      msToNextToggle = (elapsedSinceLastToggle < Wait_time) ? (Wait_time - elapsedSinceLastToggle) : 0U;
-
-      if (elapsedSinceLastToggle >= Wait_time)
-      {
-        lastBlinkTime = now;
-        ledState = !ledState;
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
-        HAL_Delay(Interval);
-        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-        msToNextToggle = Wait_time;
-        stateChanged = 1U;
-        now = HAL_GetTick();
-      }
-
-      if ((now - runStartTime) >= Last_time)
-      {
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-        isRunning = 0;
-        ledState = 0U;
-        runStartTime = 0;
-        lastBlinkTime = 0;
-        msToNextToggle = 0U;
-        keyReady = 1;
-        stateChanged = 1U;
+          uint32_t elapsed = now - phaseStartTick;
+          if (elapsed >= Last_time)
+          {
+            HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+            phase = PHASE_WAIT;
+            phaseStartTick = now;
+            buzzerPulseActive = 0U;
+            buzzerEventTick = now;
+            stateChanged = 1U;
+          }
+          msToNextEvent = (elapsed < Last_time) ? (Last_time - elapsed) : 0U;
+          break;
+        }
       }
     }
     else
     {
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-      ledState = 0U;
-      msToNextToggle = Wait_time;
+      HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+      msToNextEvent = Wait_time;
     }
 
-    uint32_t currentSecond = (msToNextToggle + 999U) / 1000U;
+    uint8_t ledState = (isRunning == 1U) && (phase == PHASE_ALERT);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    uint32_t currentSecond = (msToNextEvent + 999U) / 1000U;
     if ((currentSecond != lastDisplaySecond) || (stateChanged != 0U))
     {
-      UpdateDisplay(ledState, msToNextToggle, isRunning);
+      UpdateDisplay(ledState, msToNextEvent, isRunning);
       lastDisplaySecond = currentSecond;
     }
   }
@@ -205,9 +218,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+  
   /* USER CODE END 3 */
-
+}
 
 /**
   * @brief System Clock Configuration
@@ -292,11 +305,25 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED_Pin|BUZZER_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_TEST_GPIO_Port, LED_TEST_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : LED_TEST_Pin */
+  GPIO_InitStruct.Pin = LED_TEST_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_TEST_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LED_Pin BUZZER_Pin */
   GPIO_InitStruct.Pin = LED_Pin|BUZZER_Pin;
