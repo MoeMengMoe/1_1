@@ -61,6 +61,10 @@ void Error_Handler(void);
 #define LED_TEST_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_7
 #define LED_GPIO_Port GPIOA
+#define ENC_A_Pin GPIO_PIN_0
+#define ENC_A_GPIO_Port GPIOB
+#define ENC_B_Pin GPIO_PIN_1
+#define ENC_B_GPIO_Port GPIOB
 #define KEY_Pin GPIO_PIN_14
 #define KEY_GPIO_Port GPIOB
 #define BUZZER_Pin GPIO_PIN_9
