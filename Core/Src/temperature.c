@@ -1,5 +1,7 @@
 #include "temperature.h"
 
+static float calibrationOffsetC = 0.0f;
+
 int32_t Temperature_ClampHigh(int32_t candidate)
 {
     if (candidate < TEMP_HIGH_MIN)
@@ -22,4 +24,20 @@ float Temperature_Simulate(uint32_t nowTick)
     float slope = (phase < 0.5f) ? (phase * 2.0f) : ((1.0f - phase) * 2.0f);
 
     return baseTemp + (swing * slope);
+}
+
+void Temperature_SetCalibrationOffset(float offsetC)
+{
+    calibrationOffsetC = offsetC;
+}
+
+float Temperature_GetCalibrationOffset(void)
+{
+    return calibrationOffsetC;
+}
+
+float Temperature_ReadWithCalibration(uint32_t nowTick)
+{
+    float raw = Temperature_Simulate(nowTick);
+    return raw + calibrationOffsetC;
 }

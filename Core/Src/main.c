@@ -49,8 +49,22 @@
 I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
+typedef enum
+{
+  MENU_ITEM_OVERVIEW = 0U,
+  MENU_ITEM_WIRING = 1U,
+  MENU_ITEM_TEMPERATURE_GUARD = 2U,
+  MENU_ITEM_COUNT
+} MainMenuItem;
+
+typedef struct
+{
+  MainMenuItem currentItem;
+  uint8_t editModeActive;
+} MenuState;
+
 static uint8_t keyReady = 1U;
-static uint8_t editModeActive = 0U;
+static MenuState menuState = {MENU_ITEM_TEMPERATURE_GUARD, 0U};
 static int32_t temperatureHighC = 30;
 static float currentTemperatureC = 28.0f;
 static uint32_t lastTemperatureSampleTick = 0U;
@@ -61,7 +75,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive, uint32_t msToToggle);
+static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle);
+static void HandleButton(GPIO_PinState keyState, MenuState *menu, uint8_t *stateChanged);
+static void HandleEncoderStep(int8_t step, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged);
 
 /* USER CODE END PFP */
 
@@ -103,8 +119,8 @@ int main(void)
   SSD1306_Init();
   SSD1306_Fill(0U);
   SSD1306_UpdateScreen();
-  editModeActive = 0U;
   temperatureHighC = Temperature_ClampHigh(temperatureHighC);
+  Temperature_SetCalibrationOffset(0.0f);
   Encoder_Init();
   uint32_t initialTick = HAL_GetTick();
   lastTemperatureSampleTick = initialTick;
@@ -121,42 +137,19 @@ int main(void)
     GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
     uint8_t stateChanged = 0U;
 
-    if ((keyState == KEY_PRESSED_STATE) && (keyReady == 1U))
-    {
-      HAL_Delay(10);
-      if (HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin) == KEY_PRESSED_STATE)
-      {
-        editModeActive = (editModeActive == 0U) ? 1U : 0U;
-        keyReady = 0U;
-        stateChanged = 1U;
-      }
-    }
-    else if (keyState != KEY_PRESSED_STATE)
-    {
-      keyReady = 1U;
-    }
+    HandleButton(keyState, &menuState, &stateChanged);
 
-    if (editModeActive != 0U)
-    {
-      int8_t step = Encoder_ReadStep();
-      if (step != 0)
-      {
-        int32_t newHigh = Temperature_ClampHigh(temperatureHighC + (int32_t)step);
-        if (newHigh != temperatureHighC)
-        {
-          temperatureHighC = newHigh;
-          stateChanged = 1U;
-        }
-      }
-    }
-    else
+    int8_t step = Encoder_ReadStep();
+    HandleEncoderStep(step, &menuState, &temperatureHighC, &stateChanged);
+
+    if (menuState.editModeActive == 0U)
     {
       Encoder_ResetState();
     }
 
     if ((now - lastTemperatureSampleTick) >= TEMPERATURE_SAMPLE_PERIOD_MS)
     {
-      currentTemperatureC = Temperature_Simulate(now);
+      currentTemperatureC = Temperature_ReadWithCalibration(now);
       lastTemperatureSampleTick = now;
       stateChanged = 1U;
     }
@@ -171,7 +164,7 @@ int main(void)
     uint32_t currentSecond = now / 500U;
     if ((currentSecond != lastDisplaySecond) || (stateChanged != 0U))
     {
-      UpdateDisplay(currentTemperatureC, temperatureHighC, editModeActive, overheat, msToNextEvent);
+      UpdateDisplay(&menuState, currentTemperatureC, temperatureHighC, overheat, msToNextEvent);
       lastDisplaySecond = currentSecond;
     }
   }
@@ -311,18 +304,106 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/**
-  * @brief  Display current alarm state and temperature thresholds.
-  * @param  ledState Indicates whether the LED is currently ON (1) or OFF (0)
-  * @param  msToToggle Remaining time in milliseconds before the next LED/buzzer change
-  * @param  currentTempC Latest temperature reading in Celsius
-  * @param  tempHigh Current high threshold in Celsius
-  * @param  editMode Indicates if the threshold is being edited
-  * @param  overheatActive Non-zero when the alarm condition is active
-  * @retval None
-  */
-static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive, uint32_t msToToggle)
+static void HandleButton(GPIO_PinState keyState, MenuState *menu, uint8_t *stateChanged)
 {
+  if ((keyState == KEY_PRESSED_STATE) && (keyReady == 1U))
+  {
+    HAL_Delay(10);
+    if (HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin) == KEY_PRESSED_STATE)
+    {
+      if (menu->currentItem == MENU_ITEM_TEMPERATURE_GUARD)
+      {
+        menu->editModeActive = (menu->editModeActive == 0U) ? 1U : 0U;
+      }
+      else
+      {
+        menu->editModeActive = 0U;
+      }
+      keyReady = 0U;
+      *stateChanged = 1U;
+    }
+  }
+  else if (keyState != KEY_PRESSED_STATE)
+  {
+    keyReady = 1U;
+  }
+}
+
+static void HandleEncoderStep(int8_t step, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged)
+{
+  if (step == 0)
+  {
+    return;
+  }
+
+  if ((menu->editModeActive != 0U) && (menu->currentItem == MENU_ITEM_TEMPERATURE_GUARD))
+  {
+    int32_t newHigh = Temperature_ClampHigh(*tempHighC + (int32_t)step);
+    if (newHigh != *tempHighC)
+    {
+      *tempHighC = newHigh;
+      *stateChanged = 1U;
+    }
+    return;
+  }
+
+  if (menu->editModeActive == 0U)
+  {
+    int32_t nextItem = (int32_t)menu->currentItem + (int32_t)step;
+    while (nextItem < 0)
+    {
+      nextItem += MENU_ITEM_COUNT;
+    }
+    while (nextItem >= MENU_ITEM_COUNT)
+    {
+      nextItem -= MENU_ITEM_COUNT;
+    }
+
+    if (nextItem != (int32_t)menu->currentItem)
+    {
+      menu->currentItem = (MainMenuItem)nextItem;
+      *stateChanged = 1U;
+    }
+  }
+}
+
+static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle)
+{
+  static const char *menuTitles[MENU_ITEM_COUNT] =
+  {
+    "1/3 Overview",
+    "2/3 Wiring",
+    "3/3 TempGuard"
+  };
+
+  SSD1306_Fill(0U);
+  SSD1306_SetCursor(0U, 0U);
+  SSD1306_WriteString(menuTitles[menu->currentItem]);
+
+  if (menu->currentItem == MENU_ITEM_OVERVIEW)
+  {
+    SSD1306_SetCursor(0U, 16U);
+    SSD1306_WriteString("Rotate: switch menu");
+    SSD1306_SetCursor(0U, 32U);
+    SSD1306_WriteString("Press: edit High");
+    SSD1306_SetCursor(0U, 48U);
+    SSD1306_WriteString("Use item 3 for alarm");
+    SSD1306_UpdateScreen();
+    return;
+  }
+
+  if (menu->currentItem == MENU_ITEM_WIRING)
+  {
+    SSD1306_SetCursor(0U, 16U);
+    SSD1306_WriteString("Keep original wiring");
+    SSD1306_SetCursor(0U, 32U);
+    SSD1306_WriteString("ENC A/B + Key used");
+    SSD1306_SetCursor(0U, 48U);
+    SSD1306_WriteString("LED+Buzzer alarm");
+    SSD1306_UpdateScreen();
+    return;
+  }
+
   uint32_t seconds = (msToToggle + 999U) / 1000U;
   int32_t scaledTemp = (int32_t)(currentTempC * 10.0f);
   int32_t tempInteger = scaledTemp / 10;
@@ -335,21 +416,26 @@ static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode
 
   char tempLine[21];
   char highLine[21];
-  char stateLine[21];
-  char actionLine[25];
+  char infoLine[21];
+  char actionLine[24];
 
   snprintf(tempLine, sizeof(tempLine), "Temp:%4ld.%01ldC", (long)tempInteger, (long)tempDecimal);
   snprintf(highLine, sizeof(highLine), "High:%2ldC", (long)tempHigh);
-  snprintf(stateLine, sizeof(stateLine), "State:%s", overheatActive ? "ALERT " : "Normal");
-  snprintf(actionLine, sizeof(actionLine), "%s  Tgl:%02lus",
-           (editMode != 0U) ? "Rotate:+/-1C" : "Press:Edit ",
-           (unsigned long)seconds);
+  snprintf(infoLine, sizeof(infoLine), "Cal:%+2.1fC %s", (double)Temperature_GetCalibrationOffset(), overheatActive ? "ALERT" : "OK   ");
 
-  SSD1306_Fill(0U);
-  SSD1306_SetCursor(0U, 0U);
-  SSD1306_WriteString(tempLine);
+  if (menu->editModeActive != 0U)
+  {
+    snprintf(actionLine, sizeof(actionLine), "Rotate:+/-1C    ");
+  }
+  else
+  {
+    snprintf(actionLine, sizeof(actionLine), "Press:Edit Tgl:%2lus", (unsigned long)seconds);
+  }
+
   SSD1306_SetCursor(0U, 16U);
-  if (editMode != 0U)
+  SSD1306_WriteString(tempLine);
+  SSD1306_SetCursor(0U, 32U);
+  if (menu->editModeActive != 0U)
   {
     SSD1306_WriteStringStyled(highLine, 1U);
   }
@@ -357,9 +443,9 @@ static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode
   {
     SSD1306_WriteString(highLine);
   }
-  SSD1306_SetCursor(0U, 32U);
-  SSD1306_WriteString(stateLine);
   SSD1306_SetCursor(0U, 48U);
+  SSD1306_WriteString(infoLine);
+  SSD1306_SetCursor(0U, 56U);
   SSD1306_WriteString(actionLine);
   SSD1306_UpdateScreen();
 }
