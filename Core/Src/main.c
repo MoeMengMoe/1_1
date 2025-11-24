@@ -672,6 +672,81 @@ static float ReadTemperatureC(void)
 
 static void TemperatureModule_Process(uint32_t now)
 {
+  static uint8_t initialized = 0U;
+  static uint8_t editMode = 0U;
+  static uint8_t lastEncState = 0U;
+  static uint8_t lastButtonState = 0U;
+  static uint32_t lastButtonChangeTick = 0U;
+  static float editableHighC = 30.0f;
+  static uint32_t lastBlinkTick = 0U;
+  static uint8_t ledBlinkState = 0U;
+  static uint8_t buzzerOn = 0U;
+  static uint32_t lastBuzzerTick = 0U;
+
+  if (initialized == 0U)
+  {
+    uint8_t a = (uint8_t)HAL_GPIO_ReadPin(ENC_A_GPIO_Port, ENC_A_Pin);
+    uint8_t b = (uint8_t)HAL_GPIO_ReadPin(ENC_B_GPIO_Port, ENC_B_Pin);
+    lastEncState = (uint8_t)((a << 1) | b);
+    lastButtonState = (uint8_t)HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
+    editableHighC = tempHighC;
+    initialized = 1U;
+  }
+
+  uint8_t buttonState = (uint8_t)HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
+  if (buttonState != lastButtonState)
+  {
+    if ((now - lastButtonChangeTick) >= BUTTON_DEBOUNCE_MS)
+    {
+      lastButtonChangeTick = now;
+      lastButtonState = buttonState;
+      if (buttonState == KEY_PRESSED_STATE)
+      {
+        editMode = (uint8_t)(1U - editMode);
+        displayDirty = 1U;
+      }
+    }
+  }
+
+  uint8_t aState = (uint8_t)HAL_GPIO_ReadPin(ENC_A_GPIO_Port, ENC_A_Pin);
+  uint8_t bState = (uint8_t)HAL_GPIO_ReadPin(ENC_B_GPIO_Port, ENC_B_Pin);
+  uint8_t encState = (uint8_t)((aState << 1) | bState);
+  if ((editMode != 0U) && (encState != lastEncState))
+  {
+    int8_t direction = 0;
+    if (((lastEncState == 0U) && (encState == 1U)) ||
+        ((lastEncState == 1U) && (encState == 3U)) ||
+        ((lastEncState == 3U) && (encState == 2U)) ||
+        ((lastEncState == 2U) && (encState == 0U)))
+    {
+      direction = 1;
+    }
+    else if (((lastEncState == 0U) && (encState == 2U)) ||
+             ((lastEncState == 2U) && (encState == 3U)) ||
+             ((lastEncState == 3U) && (encState == 1U)) ||
+             ((lastEncState == 1U) && (encState == 0U)))
+    {
+      direction = -1;
+    }
+
+    if (direction != 0)
+    {
+      editableHighC += (float)direction * TEMP_HIGH_STEP;
+      if (editableHighC < TEMP_HIGH_MIN)
+      {
+        editableHighC = TEMP_HIGH_MIN;
+      }
+      else if (editableHighC > TEMP_HIGH_MAX)
+      {
+        editableHighC = TEMP_HIGH_MAX;
+      }
+      displayDirty = 1U;
+    }
+    lastEncState = encState;
+  }
+
+  tempHighC = editableHighC;
+
   if ((lastTempSampleTick == 0U) || ((now - lastTempSampleTick) >= TEMP_SAMPLE_PERIOD_MS))
   {
     temperatureC = ReadTemperatureC();
@@ -680,11 +755,41 @@ static void TemperatureModule_Process(uint32_t now)
   }
 
   uint8_t alert = (temperatureC >= tempHighC) ? 1U : 0U;
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, alert ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (alert != 0U)
+  {
+    if ((now - lastBlinkTick) >= 250U)
+    {
+      ledBlinkState = (uint8_t)(1U - ledBlinkState);
+      lastBlinkTick = now;
+    }
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledBlinkState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    uint32_t buzzerWindow = buzzerOn ? 200U : 300U;
+    if ((now - lastBuzzerTick) >= buzzerWindow)
+    {
+      buzzerOn = (uint8_t)(1U - buzzerOn);
+      HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, buzzerOn ? GPIO_PIN_RESET : GPIO_PIN_SET);
+      lastBuzzerTick = now;
+    }
+  }
+  else
+  {
+    ledBlinkState = 0U;
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+    buzzerOn = 0U;
+    lastBuzzerTick = now;
+  }
 
   if ((displayDirty != 0U) || ((now - lastUiRefreshTick) > 500U))
   {
     RenderTemperature(temperatureC, tempHighC, alert);
+    if (editMode != 0U)
+    {
+      SSD1306_SetCursor(0U, 32U);
+      SSD1306_WriteString("> ");
+      SSD1306_UpdateScreen();
+    }
     displayDirty = 0U;
     lastUiRefreshTick = now;
   }
