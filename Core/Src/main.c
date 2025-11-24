@@ -61,7 +61,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive);
+static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive, uint32_t msToToggle);
 
 /* USER CODE END PFP */
 
@@ -163,7 +163,6 @@ int main(void)
 
     uint8_t overheat = (currentTemperatureC >= (float)temperatureHighC) ? 1U : 0U;
     AlarmStatus alarmStatus = Alarm_Service(now, overheat, TEMPERATURE_SAMPLE_PERIOD_MS);
-    uint8_t ledState = alarmStatus.led_state;
     uint32_t msToNextEvent = alarmStatus.ms_to_next_event;
     if (alarmStatus.alarm_changed != 0U)
     {
@@ -172,7 +171,7 @@ int main(void)
     uint32_t currentSecond = now / 500U;
     if ((currentSecond != lastDisplaySecond) || (stateChanged != 0U))
     {
-      UpdateDisplay(ledState, msToNextEvent, currentTemperatureC, temperatureHighC, editModeActive, overheat);
+      UpdateDisplay(currentTemperatureC, temperatureHighC, editModeActive, overheat, msToNextEvent);
       lastDisplaySecond = currentSecond;
     }
   }
@@ -322,7 +321,7 @@ static void MX_GPIO_Init(void)
   * @param  overheatActive Non-zero when the alarm condition is active
   * @retval None
   */
-static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive)
+static void UpdateDisplay(float currentTempC, int32_t tempHigh, uint8_t editMode, uint8_t overheatActive, uint32_t msToToggle)
 {
   uint32_t seconds = (msToToggle + 999U) / 1000U;
   int32_t scaledTemp = (int32_t)(currentTempC * 10.0f);
@@ -334,32 +333,34 @@ static void UpdateDisplay(uint8_t ledState, uint32_t msToToggle, float currentTe
     tempDecimal = -tempDecimal;
   }
 
-  char line1[21];
-  char line2[25];
-  char line3[21];
-  char line4[21];
+  char tempLine[21];
+  char highLine[21];
+  char stateLine[21];
+  char actionLine[25];
 
-  snprintf(line1, sizeof(line1), "LED: %s %s", ledState ? "ON " : "OFF", overheatActive ? "ALARM" : "SAFE");
-  snprintf(line2, sizeof(line2), "NEXT: %03lus", (unsigned long)seconds);
-  snprintf(line3, sizeof(line3), "Temp:%4ld.%01ldC", (long)tempInteger, (long)tempDecimal);
-  if (editMode != 0U)
-  {
-    snprintf(line4, sizeof(line4), ">High:%2ldC<", (long)tempHigh);
-  }
-  else
-  {
-    snprintf(line4, sizeof(line4), " High:%2ldC ", (long)tempHigh);
-  }
+  snprintf(tempLine, sizeof(tempLine), "Temp:%4ld.%01ldC", (long)tempInteger, (long)tempDecimal);
+  snprintf(highLine, sizeof(highLine), "High:%2ldC", (long)tempHigh);
+  snprintf(stateLine, sizeof(stateLine), "State:%s", overheatActive ? "ALERT " : "Normal");
+  snprintf(actionLine, sizeof(actionLine), "%s  Tgl:%02lus",
+           (editMode != 0U) ? "Rotate:+/-1C" : "Press:Edit ",
+           (unsigned long)seconds);
 
   SSD1306_Fill(0U);
   SSD1306_SetCursor(0U, 0U);
-  SSD1306_WriteString(line1);
+  SSD1306_WriteString(tempLine);
   SSD1306_SetCursor(0U, 16U);
-  SSD1306_WriteString(line2);
+  if (editMode != 0U)
+  {
+    SSD1306_WriteStringStyled(highLine, 1U);
+  }
+  else
+  {
+    SSD1306_WriteString(highLine);
+  }
   SSD1306_SetCursor(0U, 32U);
-  SSD1306_WriteString(line3);
+  SSD1306_WriteString(stateLine);
   SSD1306_SetCursor(0U, 48U);
-  SSD1306_WriteString(line4);
+  SSD1306_WriteString(actionLine);
   SSD1306_UpdateScreen();
 }
 

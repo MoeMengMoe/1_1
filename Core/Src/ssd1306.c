@@ -190,7 +190,7 @@ void SSD1306_SetCursor(uint8_t x, uint8_t y)
   cursorY = y;
 }
 
-static void SSD1306_WriteChar(char ch)
+static void SSD1306_WriteCharStyled(char ch, uint8_t invert)
 {
   if ((ch < 0x20) || (ch > 0x7F))
   {
@@ -208,9 +208,14 @@ static void SSD1306_WriteChar(char ch)
 
   for (uint8_t i = 0U; i < 5U; ++i)
   {
-    oledBuffer[offset + i] = Font5x7[index][i];
+    uint8_t column = Font5x7[index][i];
+    if (invert != 0U)
+    {
+      column = (uint8_t)~column;
+    }
+    oledBuffer[offset + i] = column;
   }
-  oledBuffer[offset + 5U] = 0x00U;
+  oledBuffer[offset + 5U] = (invert != 0U) ? 0xFFU : 0x00U;
   cursorX += 6U;
 }
 
@@ -218,8 +223,16 @@ void SSD1306_WriteString(const char *text)
 {
   while ((text != NULL) && (*text != '\0'))
   {
-    SSD1306_WriteChar(*text);
+    SSD1306_WriteCharStyled(*text, 0U);
     ++text;
   }
 }
 
+void SSD1306_WriteStringStyled(const char *text, uint8_t invert)
+{
+  while ((text != NULL) && (*text != '\0'))
+  {
+    SSD1306_WriteCharStyled(*text, invert);
+    ++text;
+  }
+}
