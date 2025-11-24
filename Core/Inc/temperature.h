@@ -8,5 +8,8 @@
 
 int32_t Temperature_ClampHigh(int32_t candidate);
 float Temperature_Simulate(uint32_t nowTick);
+void Temperature_SetCalibrationOffset(float offsetC);
+float Temperature_GetCalibrationOffset(void);
+float Temperature_ReadWithCalibration(uint32_t nowTick);
 
 #endif /* TEMPERATURE_H */

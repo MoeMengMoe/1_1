@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/encoder.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/temperature.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/alarm.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/reminder.c
 )
 
 # Add include paths
