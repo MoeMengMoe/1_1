@@ -28,6 +28,7 @@
 #include "encoder.h"
 #include "temperature.h"
 #include "alarm.h"
+#include "reminder.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,6 +39,8 @@
 /* USER CODE BEGIN PD */
 #define KEY_PRESSED_STATE GPIO_PIN_SET
 #define TEMPERATURE_SAMPLE_PERIOD_MS 500U
+#define LONG_PRESS_DURATION_MS 600U
+#define REMINDER_DEFAULT_PERIOD_SEC 30U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,9 +54,8 @@ I2C_HandleTypeDef hi2c1;
 /* USER CODE BEGIN PV */
 typedef enum
 {
-  MENU_ITEM_OVERVIEW = 0U,
-  MENU_ITEM_WIRING = 1U,
-  MENU_ITEM_TEMPERATURE_GUARD = 2U,
+  MENU_ITEM_REMINDER = 0U,
+  MENU_ITEM_TEMPERATURE_GUARD = 1U,
   MENU_ITEM_COUNT
 } MainMenuItem;
 
@@ -63,11 +65,12 @@ typedef struct
   uint8_t editModeActive;
 } MenuState;
 
-static uint8_t keyReady = 1U;
-static MenuState menuState = {MENU_ITEM_TEMPERATURE_GUARD, 0U};
+static MenuState menuState = {MENU_ITEM_REMINDER, 0U};
 static int32_t temperatureHighC = 30;
 static float currentTemperatureC = 28.0f;
 static uint32_t lastTemperatureSampleTick = 0U;
+static uint32_t lastButtonPressTick = 0U;
+static uint8_t buttonHeld = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -75,9 +78,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle);
-static void HandleButton(GPIO_PinState keyState, MenuState *menu, uint8_t *stateChanged);
-static void HandleEncoderStep(int8_t step, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged);
+static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle, ReminderStatus reminderStatus);
+static void HandleButton(GPIO_PinState keyState, uint32_t now, MenuState *menu, uint8_t *stateChanged, uint8_t *menuChanged);
+static void HandleEncoderStep(int8_t step, uint32_t now, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged);
 
 /* USER CODE END PFP */
 
@@ -125,6 +128,7 @@ int main(void)
   uint32_t initialTick = HAL_GetTick();
   lastTemperatureSampleTick = initialTick;
   Alarm_Init(initialTick);
+  Reminder_Init(REMINDER_DEFAULT_PERIOD_SEC, initialTick);
   uint32_t lastDisplaySecond = UINT32_MAX;
   /* USER CODE END 2 */
 
@@ -136,11 +140,13 @@ int main(void)
     uint32_t now = HAL_GetTick();
     GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
     uint8_t stateChanged = 0U;
+    uint8_t menuChanged = 0U;
 
-    HandleButton(keyState, &menuState, &stateChanged);
+    HandleButton(keyState, now, &menuState, &stateChanged, &menuChanged);
 
     int8_t step = Encoder_ReadStep();
-    HandleEncoderStep(step, &menuState, &temperatureHighC, &stateChanged);
+    ReminderStatus reminderStatus = Reminder_Service(now, (menuState.currentItem == MENU_ITEM_REMINDER) ? 1U : 0U);
+    HandleEncoderStep(step, now, &menuState, &temperatureHighC, &stateChanged);
 
     if (menuState.editModeActive == 0U)
     {
@@ -154,17 +160,28 @@ int main(void)
       stateChanged = 1U;
     }
 
-    uint8_t overheat = (currentTemperatureC >= (float)temperatureHighC) ? 1U : 0U;
-    AlarmStatus alarmStatus = Alarm_Service(now, overheat, TEMPERATURE_SAMPLE_PERIOD_MS);
-    uint32_t msToNextEvent = alarmStatus.ms_to_next_event;
-    if (alarmStatus.alarm_changed != 0U)
+    uint8_t overheat = 0U;
+    uint32_t msToNextEvent = TEMPERATURE_SAMPLE_PERIOD_MS;
+    if (menuState.currentItem == MENU_ITEM_TEMPERATURE_GUARD)
     {
-      stateChanged = 1U;
+      overheat = (currentTemperatureC >= (float)temperatureHighC) ? 1U : 0U;
+      AlarmStatus alarmStatus = Alarm_Service(now, overheat, TEMPERATURE_SAMPLE_PERIOD_MS);
+      msToNextEvent = alarmStatus.ms_to_next_event;
+      if (alarmStatus.alarm_changed != 0U)
+      {
+        stateChanged = 1U;
+      }
     }
+    else if (menuChanged != 0U)
+    {
+      Alarm_Service(now, 0U, TEMPERATURE_SAMPLE_PERIOD_MS);
+    }
+
     uint32_t currentSecond = now / 500U;
     if ((currentSecond != lastDisplaySecond) || (stateChanged != 0U))
     {
-      UpdateDisplay(&menuState, currentTemperatureC, temperatureHighC, overheat, msToNextEvent);
+      reminderStatus = Reminder_Service(now, (menuState.currentItem == MENU_ITEM_REMINDER) ? 1U : 0U);
+      UpdateDisplay(&menuState, currentTemperatureC, temperatureHighC, overheat, msToNextEvent, reminderStatus);
       lastDisplaySecond = currentSecond;
     }
   }
@@ -304,12 +321,19 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-static void HandleButton(GPIO_PinState keyState, MenuState *menu, uint8_t *stateChanged)
+static void HandleButton(GPIO_PinState keyState, uint32_t now, MenuState *menu, uint8_t *stateChanged, uint8_t *menuChanged)
 {
-  if ((keyState == KEY_PRESSED_STATE) && (keyReady == 1U))
+  if ((keyState == KEY_PRESSED_STATE) && (buttonHeld == 0U))
   {
-    HAL_Delay(10);
-    if (HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin) == KEY_PRESSED_STATE)
+    lastButtonPressTick = now;
+    buttonHeld = 1U;
+  }
+  else if ((keyState != KEY_PRESSED_STATE) && (buttonHeld != 0U))
+  {
+    uint32_t pressDuration = now - lastButtonPressTick;
+    buttonHeld = 0U;
+
+    if (pressDuration >= LONG_PRESS_DURATION_MS)
     {
       if (menu->currentItem == MENU_ITEM_TEMPERATURE_GUARD)
       {
@@ -317,26 +341,29 @@ static void HandleButton(GPIO_PinState keyState, MenuState *menu, uint8_t *state
       }
       else
       {
+        Reminder_Toggle(now);
         menu->editModeActive = 0U;
       }
-      keyReady = 0U;
-      *stateChanged = 1U;
     }
-  }
-  else if (keyState != KEY_PRESSED_STATE)
-  {
-    keyReady = 1U;
+    else
+    {
+      menu->currentItem = (menu->currentItem == MENU_ITEM_REMINDER) ? MENU_ITEM_TEMPERATURE_GUARD : MENU_ITEM_REMINDER;
+      menu->editModeActive = 0U;
+      *menuChanged = 1U;
+    }
+
+    *stateChanged = 1U;
   }
 }
 
-static void HandleEncoderStep(int8_t step, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged)
+static void HandleEncoderStep(int8_t step, uint32_t now, MenuState *menu, int32_t *tempHighC, uint8_t *stateChanged)
 {
   if (step == 0)
   {
     return;
   }
 
-  if ((menu->editModeActive != 0U) && (menu->currentItem == MENU_ITEM_TEMPERATURE_GUARD))
+  if ((menu->currentItem == MENU_ITEM_TEMPERATURE_GUARD) && (menu->editModeActive != 0U))
   {
     int32_t newHigh = Temperature_ClampHigh(*tempHighC + (int32_t)step);
     if (newHigh != *tempHighC)
@@ -347,64 +374,50 @@ static void HandleEncoderStep(int8_t step, MenuState *menu, int32_t *tempHighC, 
     return;
   }
 
-  if (menu->editModeActive == 0U)
+  if (menu->currentItem == MENU_ITEM_REMINDER)
   {
-    int32_t nextItem = (int32_t)menu->currentItem + (int32_t)step;
-    while (nextItem < 0)
-    {
-      nextItem += MENU_ITEM_COUNT;
-    }
-    while (nextItem >= MENU_ITEM_COUNT)
-    {
-      nextItem -= MENU_ITEM_COUNT;
-    }
-
-    if (nextItem != (int32_t)menu->currentItem)
-    {
-      menu->currentItem = (MainMenuItem)nextItem;
-      *stateChanged = 1U;
-    }
+    Reminder_AdjustPeriod(step, now);
+    *stateChanged = 1U;
   }
 }
 
-static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle)
+static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tempHigh, uint8_t overheatActive, uint32_t msToToggle, ReminderStatus reminderStatus)
 {
   static const char *menuTitles[MENU_ITEM_COUNT] =
   {
-    "1/3 Overview",
-    "2/3 Wiring",
-    "3/3 TempGuard"
+    "1/2 Reminder",
+    "2/2 TempGuard"
   };
 
   SSD1306_Fill(0U);
   SSD1306_SetCursor(0U, 0U);
   SSD1306_WriteString(menuTitles[menu->currentItem]);
+  (void)msToToggle;
 
-  if (menu->currentItem == MENU_ITEM_OVERVIEW)
+  if (menu->currentItem == MENU_ITEM_REMINDER)
   {
+    char statusLine[21];
+    char countdownLine[21];
+    char periodLine[21];
+    char hintLine[24];
+
+    snprintf(statusLine, sizeof(statusLine), "State:%s", (reminderStatus.active != 0U) ? "Running " : "Paused  ");
+    snprintf(countdownLine, sizeof(countdownLine), "Left:%4lus", (unsigned long)reminderStatus.remaining_seconds);
+    snprintf(periodLine, sizeof(periodLine), "Period:%3lus", (unsigned long)reminderStatus.period_seconds);
+    snprintf(hintLine, sizeof(hintLine), "Short:Menu Long:%s", (reminderStatus.active != 0U) ? "Stop" : "Start");
+
     SSD1306_SetCursor(0U, 16U);
-    SSD1306_WriteString("Rotate: switch menu");
+    SSD1306_WriteString(statusLine);
     SSD1306_SetCursor(0U, 32U);
-    SSD1306_WriteString("Press: edit High");
+    SSD1306_WriteString(countdownLine);
     SSD1306_SetCursor(0U, 48U);
-    SSD1306_WriteString("Use item 3 for alarm");
+    SSD1306_WriteString(periodLine);
+    SSD1306_SetCursor(0U, 56U);
+    SSD1306_WriteString(hintLine);
     SSD1306_UpdateScreen();
     return;
   }
 
-  if (menu->currentItem == MENU_ITEM_WIRING)
-  {
-    SSD1306_SetCursor(0U, 16U);
-    SSD1306_WriteString("Keep original wiring");
-    SSD1306_SetCursor(0U, 32U);
-    SSD1306_WriteString("ENC A/B + Key used");
-    SSD1306_SetCursor(0U, 48U);
-    SSD1306_WriteString("LED+Buzzer alarm");
-    SSD1306_UpdateScreen();
-    return;
-  }
-
-  uint32_t seconds = (msToToggle + 999U) / 1000U;
   int32_t scaledTemp = (int32_t)(currentTempC * 10.0f);
   int32_t tempInteger = scaledTemp / 10;
   int32_t tempDecimal = scaledTemp - (tempInteger * 10);
@@ -429,7 +442,7 @@ static void UpdateDisplay(const MenuState *menu, float currentTempC, int32_t tem
   }
   else
   {
-    snprintf(actionLine, sizeof(actionLine), "Press:Edit Tgl:%2lus", (unsigned long)seconds);
+    snprintf(actionLine, sizeof(actionLine), "Short:Menu Long:Edit");
   }
 
   SSD1306_SetCursor(0U, 16U);
