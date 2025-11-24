@@ -177,6 +177,7 @@ int main(void)
   while (1)
   {
     uint32_t now = HAL_GetTick();
+    HAL_GPIO_WritePin(LED_TEST_GPIO_Port, LED_TEST_Pin, GPIO_PIN_RESET);
     GPIO_PinState keyState = HAL_GPIO_ReadPin(KEY_GPIO_Port, KEY_Pin);
     ButtonEvent_t event = Button_Poll(now, keyState);
     HandleButtonEvent(event, now);
