@@ -27,8 +27,6 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include "ssd1306.h"
 #include "drv8833.h"
 /* USER CODE END Includes */
@@ -66,6 +64,7 @@ typedef enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define KEY_PRESSED_STATE GPIO_PIN_SET
+/* ENC_KEY (PA10) is wired with a pull-up; low means pressed */
 #define ENC_KEY_PRESSED_STATE GPIO_PIN_RESET
 #define BUTTON_LONG_PRESS_MS 800U
 #define BUTTON_DEBOUNCE_MS 20U
