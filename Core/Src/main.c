@@ -18,14 +18,17 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
+#include "i2c.h"
+#include "tim.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <stdio.h>
-#include <stdint.h>
-#include <string.h>
 #include "ssd1306.h"
+#include "drv8833.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,6 +49,7 @@ typedef enum
 {
   MODULE_TIMER = 0U,
   MODULE_TEMPERATURE,
+  MODULE_FAN,
   MODULE_COUNT
 } ModuleId_t;
 
@@ -60,17 +64,21 @@ typedef enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define KEY_PRESSED_STATE GPIO_PIN_SET
+/* ENC_KEY (PA10) is wired with a pull-up; low means pressed */
+#define ENC_KEY_PRESSED_STATE GPIO_PIN_RESET
 #define BUTTON_LONG_PRESS_MS 800U
 #define BUTTON_DEBOUNCE_MS 20U
 #define TEMP_SAMPLE_PERIOD_MS 1000U
 #define TEMP_HIGH_STEP 0.5f
 #define TEMP_HIGH_MIN 20.0f
 #define TEMP_HIGH_MAX 80.0f
+#define ENCODER_PULSES_PER_TURN 40
+#define FAN_DUTY_MAX 100U
 
-#define THERMISTOR_BETA 3950.0f
-#define THERMISTOR_R0 10000.0f
+#define THERMISTOR_BETA 4250.0f
+#define THERMISTOR_R0 100000.0f
 #define THERMISTOR_T0 298.15f
-#define SERIES_RESISTOR 4700.0f
+#define SERIES_RESISTOR 100000.0f
 #define VREF 3.3f
 #define ADC_MAX 4095.0f
 /* USER CODE END PD */
@@ -81,9 +89,6 @@ typedef enum
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-
-I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
 static uint8_t isRunning = 0U;
@@ -103,21 +108,31 @@ static float temperatureC = 0.0f;
 static float tempHighC = 30.0f;
 static uint32_t lastTempSampleTick = 0U;
 static uint32_t lastUiRefreshTick = 0U;
+static uint8_t fanEnabled = 0U;
+static uint8_t fanDuty = 0U;
+static uint8_t fanModuleInitialized = 0U;
+static uint8_t fanKeyLastState = 0U;
+static uint32_t fanKeyLastChangeTick = 0U;
+static uint8_t encoderReady = 0U;
+static int16_t encoderLastCount = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 static void TimerModule_Reset(uint32_t now);
 static void TimerModule_Toggle(uint32_t now);
 static void TimerModule_Process(uint32_t now);
 static void TemperatureModule_Process(uint32_t now);
+static void FanModule_Init(uint32_t now);
+static void FanModule_Process(uint32_t now);
+static void FanModule_ApplyOutput(void);
+static int16_t Encoder_GetDelta(void);
+static void Encoder_ResetPosition(void);
 static void RenderMenu(void);
 static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running);
 static void RenderTemperature(float tempC, float highC, uint8_t isAlert);
+static void RenderFanManual(uint8_t enabled, uint8_t duty);
 static ButtonEvent_t Button_Poll(uint32_t now, GPIO_PinState keyState);
 static void HandleButtonEvent(ButtonEvent_t event, uint32_t now);
 static float ReadTemperatureC(void);
@@ -162,7 +177,13 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_ADC1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  DRV8833_Init();
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+  encoderReady = 1U;
+  Encoder_ResetPosition();
   SSD1306_Init();
   SSD1306_Fill(0U);
   SSD1306_UpdateScreen();
@@ -199,9 +220,13 @@ int main(void)
       {
         TimerModule_Process(now);
       }
-      else
+      else if (currentModule == MODULE_TEMPERATURE)
       {
         TemperatureModule_Process(now);
+      }
+      else
+      {
+        FanModule_Process(now);
       }
     }
   }
@@ -226,10 +251,13 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -239,162 +267,21 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
-  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV2;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Common config
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_0;
-  sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-  if (HAL_ADCEx_Calibration_Start(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_TEST_GPIO_Port, LED_TEST_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin : LED_TEST_Pin */
-  GPIO_InitStruct.Pin = LED_TEST_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_TEST_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LED_Pin BUZZER_Pin */
-  GPIO_InitStruct.Pin = LED_Pin|BUZZER_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ENC_A_Pin ENC_B_Pin */
-  GPIO_InitStruct.Pin = ENC_A_Pin|ENC_B_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : KEY_Pin */
-  GPIO_InitStruct.Pin = KEY_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(KEY_GPIO_Port, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -402,8 +289,10 @@ static void RenderMenu(void)
 {
   char line1[18];
   char line2[18];
+  char line3[18];
   snprintf(line1, sizeof(line1), "%c Timer", (currentModule == MODULE_TIMER) ? '>' : ' ');
   snprintf(line2, sizeof(line2), "%c Temp", (currentModule == MODULE_TEMPERATURE) ? '>' : ' ');
+  snprintf(line3, sizeof(line3), "%c Fan PWM", (currentModule == MODULE_FAN) ? '>' : ' ');
   SSD1306_Fill(0U);
   SSD1306_SetCursor(0U, 0U);
   SSD1306_WriteString("Main Menu");
@@ -411,10 +300,12 @@ static void RenderMenu(void)
   SSD1306_WriteString(line1);
   SSD1306_SetCursor(0U, 32U);
   SSD1306_WriteString(line2);
-  SSD1306_SetCursor(8U, 48U);
-  SSD1306_WriteString("Short: Next");
-  SSD1306_SetCursor(8U, 56U);
-  SSD1306_WriteString("Long: Enter ");
+  SSD1306_SetCursor(0U, 48U);
+  SSD1306_WriteString(line3);
+  SSD1306_SetCursor(88U, 48U);
+  SSD1306_WriteString("Short:Next");
+  SSD1306_SetCursor(88U, 56U);
+  SSD1306_WriteString("Long:Enter");
   SSD1306_UpdateScreen();
 }
 
@@ -475,10 +366,36 @@ static void RenderTemperature(float tempC, float highC, uint8_t isAlert)
   SSD1306_WriteString(line2);
   SSD1306_SetCursor(0U, 48U);
   SSD1306_WriteString(line3);
+  SSD1306_SetCursor(0U, 56U);
+  SSD1306_WriteString("EncKey:Edit");
   SSD1306_SetCursor(90U, 48U);
   SSD1306_WriteString("Short:+0.5");
   SSD1306_SetCursor(90U, 56U);
   SSD1306_WriteString("Long:Menu");
+  SSD1306_UpdateScreen();
+}
+
+static void RenderFanManual(uint8_t enabled, uint8_t duty)
+{
+  char line1[25];
+  char line2[25];
+  char line3[25];
+
+  snprintf(line1, sizeof(line1), "Mode: Manual");
+  snprintf(line2, sizeof(line2), "Fan: %s", enabled ? "On " : "Off");
+  snprintf(line3, sizeof(line3), "Speed: %3u%% (Enc)", (unsigned int)duty);
+
+  SSD1306_Fill(0U);
+  SSD1306_SetCursor(0U, 0U);
+  SSD1306_WriteString("Fan Control (PWM)");
+  SSD1306_SetCursor(0U, 16U);
+  SSD1306_WriteString(line1);
+  SSD1306_SetCursor(0U, 32U);
+  SSD1306_WriteString(line2);
+  SSD1306_SetCursor(0U, 48U);
+  SSD1306_WriteString(line3);
+  SSD1306_SetCursor(0U, 56U);
+  SSD1306_WriteString("Key:Stop Long:Menu");
   SSD1306_UpdateScreen();
 }
 
@@ -516,12 +433,20 @@ static void HandleButtonEvent(ButtonEvent_t event, uint32_t now)
       {
         TimerModule_Reset(now);
       }
+      else if (currentModule == MODULE_FAN)
+      {
+        FanModule_Init(now);
+      }
+      Encoder_ResetPosition();
       displayDirty = 1U;
     }
     else
     {
       uiState = UI_STATE_MENU;
-      TimerModule_Reset(now);
+      if (currentModule == MODULE_TIMER)
+      {
+        TimerModule_Reset(now);
+      }
       HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
       HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
       displayDirty = 1U;
@@ -539,6 +464,12 @@ static void HandleButtonEvent(ButtonEvent_t event, uint32_t now)
       TimerModule_Toggle(now);
       displayDirty = 1U;
     }
+    else if (currentModule == MODULE_FAN)
+    {
+      fanEnabled = (uint8_t)(1U - fanEnabled);
+      FanModule_ApplyOutput();
+      displayDirty = 1U;
+    }
     else
     {
       tempHighC += TEMP_HIGH_STEP;
@@ -549,6 +480,30 @@ static void HandleButtonEvent(ButtonEvent_t event, uint32_t now)
       displayDirty = 1U;
     }
   }
+}
+
+static void Encoder_ResetPosition(void)
+{
+  if (encoderReady == 0U)
+  {
+    return;
+  }
+
+  __HAL_TIM_SET_COUNTER(&htim3, 0U);
+  encoderLastCount = 0;
+}
+
+static int16_t Encoder_GetDelta(void)
+{
+  if (encoderReady == 0U)
+  {
+    return 0;
+  }
+
+  int16_t current = (int16_t)__HAL_TIM_GET_COUNTER(&htim3);
+  int16_t delta = (int16_t)(current - encoderLastCount);
+  encoderLastCount = current;
+  return delta;
 }
 
 static void TimerModule_Reset(uint32_t now)
@@ -646,6 +601,89 @@ static void TimerModule_Process(uint32_t now)
   }
 }
 
+static void FanModule_ApplyOutput(void)
+{
+  if ((fanEnabled != 0U) && (fanDuty > 0U))
+  {
+    if (fanDuty > FAN_DUTY_MAX)
+    {
+      fanDuty = FAN_DUTY_MAX;
+    }
+    DRV8833_Forward(fanDuty);
+  }
+  else
+  {
+    DRV8833_Coast();
+  }
+}
+
+static void FanModule_Init(uint32_t now)
+{
+  (void)now;
+  if (fanModuleInitialized == 0U)
+  {
+    fanDuty = 30U;
+    fanEnabled = 0U;
+    fanModuleInitialized = 1U;
+  }
+  fanKeyLastState = (uint8_t)HAL_GPIO_ReadPin(ENC_KEY_GPIO_Port, ENC_KEY_Pin);
+  fanKeyLastChangeTick = HAL_GetTick();
+  FanModule_ApplyOutput();
+  displayDirty = 1U;
+}
+
+static void FanModule_Process(uint32_t now)
+{
+  if (fanModuleInitialized == 0U)
+  {
+    FanModule_Init(now);
+  }
+
+  int16_t encoderDelta = Encoder_GetDelta();
+  if (encoderDelta != 0)
+  {
+    int16_t newDuty = (int16_t)fanDuty + encoderDelta;
+    if (newDuty < 0)
+    {
+      newDuty = 0;
+    }
+    else if (newDuty > (int16_t)FAN_DUTY_MAX)
+    {
+      newDuty = (int16_t)FAN_DUTY_MAX;
+    }
+
+    if (fanDuty != (uint8_t)newDuty)
+    {
+      fanDuty = (uint8_t)newDuty;
+      FanModule_ApplyOutput();
+      displayDirty = 1U;
+    }
+  }
+
+  uint8_t keyState = (uint8_t)HAL_GPIO_ReadPin(ENC_KEY_GPIO_Port, ENC_KEY_Pin);
+  if (keyState != fanKeyLastState)
+  {
+    if ((now - fanKeyLastChangeTick) >= BUTTON_DEBOUNCE_MS)
+    {
+      fanKeyLastChangeTick = now;
+      fanKeyLastState = keyState;
+      if (keyState == ENC_KEY_PRESSED_STATE)
+      {
+        fanEnabled = (uint8_t)(1U - fanEnabled);
+        FanModule_ApplyOutput();
+        displayDirty = 1U;
+      }
+    }
+  }
+
+  if ((displayDirty != 0U) || ((now - lastUiRefreshTick) > 500U))
+  {
+    RenderFanManual(fanEnabled, fanDuty);
+    displayDirty = 0U;
+    lastUiRefreshTick = now;
+  }
+}
+
 static float ReadTemperatureC(void)
 {
   if (HAL_ADC_Start(&hadc1) != HAL_OK)
@@ -660,18 +698,73 @@ static float ReadTemperatureC(void)
   uint32_t raw = HAL_ADC_GetValue(&hadc1);
   HAL_ADC_Stop(&hadc1);
 
-  float voltage = ((float)raw / ADC_MAX) * VREF;
-  if ((voltage <= 0.01f) || (voltage >= (VREF - 0.01f)))
+  /* Convert ADC ratio to resistance using a 100k/NTC divider with thermistor to GND */
+  float ratio = (float)raw / ADC_MAX;
+  if (ratio <= 0.0f)
   {
-    return temperatureC;
+    ratio = 0.0001f;
   }
-  float resistance = (SERIES_RESISTOR * (VREF - voltage)) / voltage;
+  else if (ratio >= 0.9999f)
+  {
+    ratio = 0.9999f;
+  }
+
+  float resistance = SERIES_RESISTOR * ratio / (1.0f - ratio);
   float tempK = 1.0f / ((1.0f / THERMISTOR_BETA) * logf(resistance / THERMISTOR_R0) + (1.0f / THERMISTOR_T0));
   return tempK - 273.15f;
 }
 
 static void TemperatureModule_Process(uint32_t now)
 {
+  static uint8_t initialized = 0U;
+  static uint8_t editMode = 0U;
+  static uint8_t lastButtonState = 0U;
+  static uint32_t lastButtonChangeTick = 0U;
+  static float editableHighC = 30.0f;
+  static uint32_t lastBlinkTick = 0U;
+  static uint8_t ledBlinkState = 0U;
+  static uint8_t buzzerOn = 0U;
+  static uint32_t lastBuzzerTick = 0U;
+
+  if (initialized == 0U)
+  {
+    lastButtonState = (uint8_t)HAL_GPIO_ReadPin(ENC_KEY_GPIO_Port, ENC_KEY_Pin);
+    editableHighC = tempHighC;
+    initialized = 1U;
+  }
+
+  uint8_t buttonState = (uint8_t)HAL_GPIO_ReadPin(ENC_KEY_GPIO_Port, ENC_KEY_Pin);
+  if (buttonState != lastButtonState)
+  {
+    if ((now - lastButtonChangeTick) >= BUTTON_DEBOUNCE_MS)
+    {
+      lastButtonChangeTick = now;
+      lastButtonState = buttonState;
+      if (buttonState == ENC_KEY_PRESSED_STATE)
+      {
+        editMode = (uint8_t)(1U - editMode);
+        displayDirty = 1U;
+      }
+    }
+  }
+
+  int16_t encoderDelta = Encoder_GetDelta();
+  if ((editMode != 0U) && (encoderDelta != 0))
+  {
+    editableHighC += (float)encoderDelta * TEMP_HIGH_STEP;
+    if (editableHighC < TEMP_HIGH_MIN)
+    {
+      editableHighC = TEMP_HIGH_MIN;
+    }
+    else if (editableHighC > TEMP_HIGH_MAX)
+    {
+      editableHighC = TEMP_HIGH_MAX;
+    }
+    displayDirty = 1U;
+  }
+
+  tempHighC = editableHighC;
+
   if ((lastTempSampleTick == 0U) || ((now - lastTempSampleTick) >= TEMP_SAMPLE_PERIOD_MS))
   {
     temperatureC = ReadTemperatureC();
@@ -680,11 +773,41 @@ static void TemperatureModule_Process(uint32_t now)
   }
 
   uint8_t alert = (temperatureC >= tempHighC) ? 1U : 0U;
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, alert ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (alert != 0U)
+  {
+    if ((now - lastBlinkTick) >= 250U)
+    {
+      ledBlinkState = (uint8_t)(1U - ledBlinkState);
+      lastBlinkTick = now;
+    }
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledBlinkState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+    uint32_t buzzerWindow = buzzerOn ? 200U : 300U;
+    if ((now - lastBuzzerTick) >= buzzerWindow)
+    {
+      buzzerOn = (uint8_t)(1U - buzzerOn);
+      HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, buzzerOn ? GPIO_PIN_RESET : GPIO_PIN_SET);
+      lastBuzzerTick = now;
+    }
+  }
+  else
+  {
+    ledBlinkState = 0U;
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+    buzzerOn = 0U;
+    lastBuzzerTick = now;
+  }
 
   if ((displayDirty != 0U) || ((now - lastUiRefreshTick) > 500U))
   {
     RenderTemperature(temperatureC, tempHighC, alert);
+    if (editMode != 0U)
+    {
+      SSD1306_SetCursor(0U, 32U);
+      SSD1306_WriteString("> ");
+      SSD1306_UpdateScreen();
+    }
     displayDirty = 0U;
     lastUiRefreshTick = now;
   }

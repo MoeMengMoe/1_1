@@ -4,6 +4,7 @@
 #include <string.h>
 
 #define SSD1306_I2C_ADDR (0x3CU << 1)
+#define SSD1306_I2C_TIMEOUT_MS 50U
 
 extern I2C_HandleTypeDef hi2c1;
 
@@ -111,10 +112,30 @@ static const uint8_t Font5x7[][5] = {
     {0x7F,0x7F,0x7F,0x7F,0x7F}, // 0x7F del (filled)
 };
 
+static HAL_StatusTypeDef SSD1306_I2C_Write(uint8_t *buffer, uint16_t size)
+{
+  if ((buffer == NULL) || (size == 0U))
+  {
+    return HAL_OK;
+  }
+
+  HAL_StatusTypeDef status = HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, buffer, size, SSD1306_I2C_TIMEOUT_MS);
+  if (status == HAL_OK)
+  {
+    return status;
+  }
+
+  /* Recover from a stuck bus so the main loop does not hang forever */
+  HAL_I2C_DeInit(&hi2c1);
+  HAL_Delay(2U);
+  HAL_I2C_Init(&hi2c1);
+  return HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, buffer, size, SSD1306_I2C_TIMEOUT_MS);
+}
+
 static void SSD1306_WriteCommand(uint8_t command)
 {
   uint8_t buffer[2U] = {0x00U, command};
-  HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, buffer, sizeof(buffer), HAL_MAX_DELAY);
+  (void)SSD1306_I2C_Write(buffer, sizeof(buffer));
 }
 
 static void SSD1306_WriteData(const uint8_t *data, uint16_t size)
@@ -129,7 +150,10 @@ static void SSD1306_WriteData(const uint8_t *data, uint16_t size)
     uint16_t chunk = (size > SSD1306_WIDTH) ? SSD1306_WIDTH : size;
     i2cTxBuffer[0U] = 0x40U;
     memcpy(&i2cTxBuffer[1U], data, chunk);
-    HAL_I2C_Master_Transmit(&hi2c1, SSD1306_I2C_ADDR, i2cTxBuffer, chunk + 1U, HAL_MAX_DELAY);
+    if (SSD1306_I2C_Write(i2cTxBuffer, chunk + 1U) != HAL_OK)
+    {
+      return;
+    }
     data += chunk;
     size -= chunk;
   }
