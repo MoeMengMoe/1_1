@@ -74,6 +74,8 @@ typedef enum
 #define TEMP_HIGH_MAX 80.0f
 #define ENCODER_PULSES_PER_TURN 40
 #define FAN_DUTY_MAX 100U
+#define STARTUP_FRAME_INTERVAL_MS 120U
+#define FAN_ANIM_INTERVAL_MS 120U
 
 #define THERMISTOR_BETA 4250.0f
 #define THERMISTOR_R0 100000.0f
@@ -115,6 +117,22 @@ static uint8_t fanKeyLastState = 0U;
 static uint32_t fanKeyLastChangeTick = 0U;
 static uint8_t encoderReady = 0U;
 static int16_t encoderLastCount = 0;
+static uint8_t fanAnimFrame = 0U;
+static uint32_t fanLastAnimTick = 0U;
+
+static const uint8_t heartFrame1[] = {
+  0x06, 0x60, 0x1F, 0xF0, 0x3F, 0xF8, 0x7F, 0xFC,
+  0x7F, 0xFC, 0x7F, 0xFC, 0x3F, 0xF8, 0x1F, 0xF0,
+  0x0F, 0xE0, 0x07, 0xC0, 0x03, 0x80, 0x03, 0x00,
+  0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t heartFrame2[] = {
+  0x03, 0x30, 0x0F, 0xF0, 0x1F, 0xF8, 0x3F, 0xFC,
+  0x3F, 0xFC, 0x1F, 0xF8, 0x0F, 0xF0, 0x07, 0xE0,
+  0x03, 0xC0, 0x01, 0x80, 0x01, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -127,12 +145,15 @@ static void TemperatureModule_Process(uint32_t now);
 static void FanModule_Init(uint32_t now);
 static void FanModule_Process(uint32_t now);
 static void FanModule_ApplyOutput(void);
+static void PlayStartupAnimation(void);
 static int16_t Encoder_GetDelta(void);
 static void Encoder_ResetPosition(void);
 static void RenderMenu(void);
-static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running);
+static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running, uint8_t progressPercent);
 static void RenderTemperature(float tempC, float highC, uint8_t isAlert);
-static void RenderFanManual(uint8_t enabled, uint8_t duty);
+static void RenderFanManual(uint8_t enabled, uint8_t duty, uint8_t animFrame);
+static void DrawProgressRing(uint8_t centerX, uint8_t centerY, uint8_t radius, uint8_t percentFilled);
+static void DrawFanSpinner(uint8_t centerX, uint8_t centerY, uint8_t frame, uint8_t enabled);
 static ButtonEvent_t Button_Poll(uint32_t now, GPIO_PinState keyState);
 static void HandleButtonEvent(ButtonEvent_t event, uint32_t now);
 static float ReadTemperatureC(void);
@@ -145,6 +166,35 @@ const uint32_t Last_time = 10000U;
 const uint32_t BuzzerOnTime = 200U;
 const uint32_t BuzzerOffTime = 300U;
 /* USER CODE END 0 */
+
+static void PlayStartupAnimation(void)
+{
+  const uint8_t *frames[] = {heartFrame1, heartFrame2};
+  const uint8_t frameCount = 2U;
+  const uint8_t loopCount = 6U;
+  uint32_t startTick = HAL_GetTick();
+
+  for (uint8_t i = 0U; i < loopCount; ++i)
+  {
+    uint8_t frameIndex = (uint8_t)(i % frameCount);
+    SSD1306_Fill(0U);
+    SSD1306_DrawBitmap(56U, 12U, 16U, 16U, frames[frameIndex]);
+    SSD1306_SetCursor(28U, 36U);
+    SSD1306_WriteString("Hello, friend!");
+    SSD1306_SetCursor(40U, 48U);
+    SSD1306_WriteString("Stay warm");
+    SSD1306_UpdateScreen();
+
+    uint32_t targetTick = startTick + ((uint32_t)(i + 1U) * STARTUP_FRAME_INTERVAL_MS);
+    while ((int32_t)(targetTick - HAL_GetTick()) > 0)
+    {
+      HAL_Delay(5U);
+    }
+  }
+
+  SSD1306_Fill(0U);
+  SSD1306_UpdateScreen();
+}
 
 /**
   * @brief  The application entry point.
@@ -187,6 +237,7 @@ int main(void)
   SSD1306_Init();
   SSD1306_Fill(0U);
   SSD1306_UpdateScreen();
+  PlayStartupAnimation();
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
   TimerModule_Reset(HAL_GetTick());
@@ -309,7 +360,7 @@ static void RenderMenu(void)
   SSD1306_UpdateScreen();
 }
 
-static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running)
+static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running, uint8_t progressPercent)
 {
   uint32_t seconds = (msToToggle + 999U) / 1000U;
   const char *stateText = ledState ? "ON" : "OFF";
@@ -345,6 +396,7 @@ static void RenderTimer(uint8_t ledState, uint32_t msToToggle, uint8_t running)
   SSD1306_WriteString(line3);
   SSD1306_SetCursor(90U, 48U);
   SSD1306_WriteString("Long:Menu");
+  DrawProgressRing(104U, 24U, 12U, progressPercent);
   SSD1306_UpdateScreen();
 }
 
@@ -375,7 +427,7 @@ static void RenderTemperature(float tempC, float highC, uint8_t isAlert)
   SSD1306_UpdateScreen();
 }
 
-static void RenderFanManual(uint8_t enabled, uint8_t duty)
+static void RenderFanManual(uint8_t enabled, uint8_t duty, uint8_t animFrame)
 {
   char line1[25];
   char line2[25];
@@ -396,7 +448,54 @@ static void RenderFanManual(uint8_t enabled, uint8_t duty)
   SSD1306_WriteString(line3);
   SSD1306_SetCursor(0U, 56U);
   SSD1306_WriteString("Key:Stop Long:Menu");
+  DrawFanSpinner(104U, 24U, animFrame, enabled);
   SSD1306_UpdateScreen();
+}
+
+static void DrawProgressRing(uint8_t centerX, uint8_t centerY, uint8_t radius, uint8_t percentFilled)
+{
+  static const int8_t ringPoints[][2] = {
+    {0, -12}, {4, -11}, {8, -8}, {11, -4}, {12, 0}, {11, 4}, {8, 8}, {4, 11},
+    {0, 12}, {-4, 11}, {-8, 8}, {-11, 4}, {-12, 0}, {-11, -4}, {-8, -8}, {-4, -11}
+  };
+
+  uint8_t totalPoints = (uint8_t)(sizeof(ringPoints) / sizeof(ringPoints[0]));
+  uint8_t filledPoints = (uint8_t)((percentFilled * totalPoints + 99U) / 100U);
+  for (uint8_t i = 0U; i < totalPoints; ++i)
+  {
+    int16_t dx = (int16_t)((ringPoints[i][0] * radius) / 12);
+    int16_t dy = (int16_t)((ringPoints[i][1] * radius) / 12);
+    uint8_t x = (uint8_t)(centerX + dx);
+    uint8_t y = (uint8_t)(centerY + dy);
+    SSD1306_DrawPixel(x, y, 1U);
+    if (i < filledPoints)
+    {
+      uint8_t accentY = (uint8_t)(y + ((dy >= 0) ? 1U : (uint8_t)0U));
+      SSD1306_DrawPixel(x, accentY, 1U);
+    }
+  }
+}
+
+static void DrawFanSpinner(uint8_t centerX, uint8_t centerY, uint8_t frame, uint8_t enabled)
+{
+  static const int8_t spinnerFrames[4U][8U][2U] = {
+    {{0, -7}, {0, -6}, {7, 0}, {6, 0}, {0, 7}, {0, 6}, {-7, 0}, {-6, 0}},
+    {{5, -5}, {4, -4}, {5, 5}, {4, 4}, {-5, 5}, {-4, 4}, {-5, -5}, {-4, -4}},
+    {{0, -6}, {1, -7}, {7, 1}, {7, 0}, {0, 6}, {-1, 7}, {-7, -1}, {-7, 0}},
+    {{4, -6}, {6, -4}, {6, 4}, {4, 6}, {-4, 6}, {-6, 4}, {-6, -4}, {-4, -6}}
+  };
+
+  uint8_t frameIndex = enabled ? (uint8_t)(frame % 4U) : 0U;
+  for (uint8_t i = 0U; i < 8U; ++i)
+  {
+    uint8_t x = (uint8_t)(centerX + spinnerFrames[frameIndex][i][0]);
+    uint8_t y = (uint8_t)(centerY + spinnerFrames[frameIndex][i][1]);
+    SSD1306_DrawPixel(x, y, 1U);
+  }
+
+  SSD1306_DrawPixel(centerX, centerY, 1U);
+  SSD1306_DrawPixel(centerX + 1U, centerY, enabled ? 1U : 0U);
+  SSD1306_DrawPixel(centerX, centerY + 1U, enabled ? 1U : 0U);
 }
 
 static ButtonEvent_t Button_Poll(uint32_t now, GPIO_PinState keyState)
@@ -533,6 +632,7 @@ static void TimerModule_Process(uint32_t now)
 {
   uint8_t stateChanged = 0U;
   uint32_t msToNextEvent = Wait_time;
+  uint8_t progressPercent = 0U;
 
   if (isRunning == 1U)
   {
@@ -592,10 +692,20 @@ static void TimerModule_Process(uint32_t now)
 
   uint8_t ledState = (isRunning == 1U) && (phase == PHASE_ALERT);
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (isRunning != 0U)
+  {
+    uint32_t phaseDuration = (phase == PHASE_WAIT) ? Wait_time : Last_time;
+    uint32_t elapsed = now - phaseStartTick;
+    if (elapsed > phaseDuration)
+    {
+      elapsed = phaseDuration;
+    }
+    progressPercent = (uint8_t)((elapsed * 100U) / phaseDuration);
+  }
   uint32_t currentSecond = (msToNextEvent + 999U) / 1000U;
   if ((displayDirty != 0U) || (currentSecond != lastTimerDisplaySecond) || (stateChanged != 0U))
   {
-    RenderTimer(ledState, msToNextEvent, isRunning);
+    RenderTimer(ledState, msToNextEvent, isRunning, progressPercent);
     lastTimerDisplaySecond = currentSecond;
     displayDirty = 0U;
   }
@@ -676,9 +786,24 @@ static void FanModule_Process(uint32_t now)
     }
   }
 
+  if (fanEnabled != 0U)
+  {
+    if ((now - fanLastAnimTick) >= FAN_ANIM_INTERVAL_MS)
+    {
+      fanAnimFrame = (uint8_t)((fanAnimFrame + 1U) % 4U);
+      fanLastAnimTick = now;
+      displayDirty = 1U;
+    }
+  }
+  else
+  {
+    fanAnimFrame = 0U;
+    fanLastAnimTick = now;
+  }
+
   if ((displayDirty != 0U) || ((now - lastUiRefreshTick) > 500U))
   {
-    RenderFanManual(fanEnabled, fanDuty);
+    RenderFanManual(fanEnabled, fanDuty, fanAnimFrame);
     displayDirty = 0U;
     lastUiRefreshTick = now;
   }
