@@ -75,10 +75,10 @@ typedef enum
 #define ENCODER_PULSES_PER_TURN 40
 #define FAN_DUTY_MAX 100U
 
-#define THERMISTOR_BETA 3950.0f
-#define THERMISTOR_R0 10000.0f
+#define THERMISTOR_BETA 4250.0f
+#define THERMISTOR_R0 100000.0f
 #define THERMISTOR_T0 298.15f
-#define SERIES_RESISTOR 4700.0f
+#define SERIES_RESISTOR 100000.0f
 #define VREF 3.3f
 #define ADC_MAX 4095.0f
 /* USER CODE END PD */
@@ -698,12 +698,18 @@ static float ReadTemperatureC(void)
   uint32_t raw = HAL_ADC_GetValue(&hadc1);
   HAL_ADC_Stop(&hadc1);
 
-  float voltage = ((float)raw / ADC_MAX) * VREF;
-  if ((voltage <= 0.01f) || (voltage >= (VREF - 0.01f)))
+  /* Convert ADC ratio to resistance using a 100k/NTC divider with thermistor to GND */
+  float ratio = (float)raw / ADC_MAX;
+  if (ratio <= 0.0f)
   {
-    return temperatureC;
+    ratio = 0.0001f;
   }
-  float resistance = (SERIES_RESISTOR * (VREF - voltage)) / voltage;
+  else if (ratio >= 0.9999f)
+  {
+    ratio = 0.9999f;
+  }
+
+  float resistance = SERIES_RESISTOR * ratio / (1.0f - ratio);
   float tempK = 1.0f / ((1.0f / THERMISTOR_BETA) * logf(resistance / THERMISTOR_R0) + (1.0f / THERMISTOR_T0));
   return tempK - 273.15f;
 }

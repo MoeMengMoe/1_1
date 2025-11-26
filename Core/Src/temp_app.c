@@ -23,10 +23,10 @@ void TempApp_Init(TempAppContext_t *ctx, ADC_HandleTypeDef *adc)
   ctx->sampleIntervalMs = TEMP_APP_DEFAULT_SAMPLE_MS;
 
   TempSensorConfig_t cfg = {
-      .seriesResistor = 10000.0f,
-      .nominalResistance = 10000.0f,
+      .seriesResistor = 100000.0f,
+      .nominalResistance = 100000.0f,
       .nominalTemperatureC = 25.0f,
-      .betaCoefficient = 3950.0f,
+      .betaCoefficient = 4250.0f,
       .adcMaxCounts = 4095U};
 
   TempSensor_Init(&ctx->sensor, &cfg, ctx->adc);
