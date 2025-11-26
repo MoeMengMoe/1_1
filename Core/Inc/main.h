@@ -61,14 +61,20 @@ void Error_Handler(void);
 #define LED_TEST_GPIO_Port GPIOC
 #define LED_Pin GPIO_PIN_7
 #define LED_GPIO_Port GPIOA
-#define ENC_A_Pin GPIO_PIN_0
-#define ENC_A_GPIO_Port GPIOB
-#define ENC_B_Pin GPIO_PIN_1
-#define ENC_B_GPIO_Port GPIOB
 #define KEY_Pin GPIO_PIN_14
 #define KEY_GPIO_Port GPIOB
 #define BUZZER_Pin GPIO_PIN_9
 #define BUZZER_GPIO_Port GPIOA
+#define ENC_KEY_Pin GPIO_PIN_10
+#define ENC_KEY_GPIO_Port GPIOA
+#define FAN_A_Pin GPIO_PIN_15
+#define FAN_A_GPIO_Port GPIOA
+#define FAN_B_Pin GPIO_PIN_3
+#define FAN_B_GPIO_Port GPIOB
+#define ENC_A_Pin GPIO_PIN_4
+#define ENC_A_GPIO_Port GPIOB
+#define ENC_B_Pin GPIO_PIN_5
+#define ENC_B_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
