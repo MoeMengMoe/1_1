@@ -214,6 +214,46 @@ void SSD1306_SetCursor(uint8_t x, uint8_t y)
   cursorY = y;
 }
 
+void SSD1306_DrawPixel(uint8_t x, uint8_t y, uint8_t color)
+{
+  if ((x >= SSD1306_WIDTH) || (y >= SSD1306_HEIGHT))
+  {
+    return;
+  }
+
+  uint16_t index = ((uint16_t)(y / 8U) * SSD1306_WIDTH) + x;
+  uint8_t mask = (uint8_t)(1U << (y % 8U));
+
+  if (color != 0U)
+  {
+    oledBuffer[index] |= mask;
+  }
+  else
+  {
+    oledBuffer[index] &= (uint8_t)(~mask);
+  }
+}
+
+void SSD1306_DrawBitmap(uint8_t x, uint8_t y, uint8_t width, uint8_t height, const uint8_t *bitmap)
+{
+  if ((bitmap == NULL) || (width == 0U) || (height == 0U))
+  {
+    return;
+  }
+
+  uint16_t bytesPerRow = (uint16_t)((width + 7U) / 8U);
+  for (uint8_t row = 0U; row < height; ++row)
+  {
+    for (uint8_t col = 0U; col < width; ++col)
+    {
+      uint16_t byteIndex = (uint16_t)(row * bytesPerRow) + (col / 8U);
+      uint8_t bitMask = (uint8_t)(0x80U >> (col % 8U));
+      uint8_t pixelOn = (bitmap[byteIndex] & bitMask) != 0U ? 1U : 0U;
+      SSD1306_DrawPixel((uint8_t)(x + col), (uint8_t)(y + row), pixelOn);
+    }
+  }
+}
+
 static void SSD1306_WriteChar(char ch)
 {
   if ((ch < 0x20) || (ch > 0x7F))
